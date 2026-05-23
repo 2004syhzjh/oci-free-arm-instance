@@ -1,0 +1,95 @@
+name: Try to Create OCI VM
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 原项目规定：每 10 分钟自动在后台运行一次
+    - cron: '*/10 * * * *'
+
+jobs:
+  create-vm:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      # 利用 GitHub 缓存加速 OCI 工具安装
+      - name: Cache OCI CLI
+        uses: actions/cache@v4
+        id: oci-cli-cache
+        with:
+          path: |
+            ~/.oci
+            /opt/hostedtoolcache/Python
+          key: ${{ runner.os }}-oci-cli
+
+      - name: Install OCI CLI
+        run: |
+          pip install oci-cli
+
+      # 严格按照原项目 Step 4 配置 OCI 凭证环境
+      - name: Configure OCI CLI
+        run: |
+          mkdir -p ~/.oci
+          echo "[DEFAULT]" > ~/.oci/config
+          echo "user=${{ secrets.OCI_CLI_USER }}" >> ~/.oci/config
+          echo "fingerprint=${{ secrets.OCI_CLI_FINGERPRINT }}" >> ~/.oci/config
+          echo "tenancy=${{ secrets.OCI_CLI_TENANCY }}" >> ~/.oci/config
+          echo "region=${{ secrets.OCI_CLI_REGION }}" >> ~/.oci/config
+          
+          # 将完整的私钥内容写入 .pem 文件
+          echo "${{ secrets.OCI_CLI_KEY_CONTENT }}" > ~/.oci/oci_api_key.pem
+          chmod 600 ~/.oci/oci_api_key.pem
+          echo "key_file=~/.oci/oci_api_key.pem" >> ~/.oci/config
+
+      # 严格对齐原项目 Step 2 C 的参数（包含 4核24G、100GB引导卷、实例名等）
+      - name: Run Create VM Script
+        id: oci_request
+        run: |
+          echo "正在向甲骨文大阪区发送开机请求..."
+          
+          # 捕获 OCI 命令的输出和状态
+          oci compute instance launch \
+            --availability-domain "${{ secrets.AD_NAME }}" \
+            --compartment-id "${{ secrets.OCI_COMPARTMENT_ID }}" \
+            --shape "VM.Standard.A1.Flex" \
+            --image-id "${{ secrets.IMAGE_ID }}" \
+            --subnet-id "${{ secrets.OCI_SUBNET_ID }}" \
+            --assign-public-ip true \
+            --display-name "coolify-vm" \
+            --boot-volume-size-in-gbs 100 \
+            --shape-config '{"ocpus":4,"memoryInGBs":24}' \
+            --metadata '{"ssh_authorized_keys":"${{ secrets.SSH_PUBLIC_KEY }}"}' \
+            > oci_status.log 2>&1 || true
+            
+          cat oci_status.log
+          
+          # 检查是否由于配额不足导致失败
+          if grep -q "Out of host capacity" oci_status.log; then
+            echo "RESULT_MSG=目前无可用库存 (Out of host capacity)。10分钟后自动重试。" >> $GITHUB_ENV
+            echo "STATUS=FAILED" >> $GITHUB_ENV
+          elif grep -q "ServiceError" oci_status.log; then
+            echo "RESULT_MSG=请求发生异常，请检查配置参数是否正确。" >> $GITHUB_ENV
+            echo "STATUS=ERROR" >> $GITHUB_ENV
+          else
+            echo "RESULT_MSG=🎉 恭喜！ARM 实例创建成功！请立刻去 Actions 页面手动关闭此工作流！" >> $GITHUB_ENV
+            echo "STATUS=SUCCESS" >> $GITHUB_ENV
+          fi
+
+      # 容错版通知：如果 Discord 网址是假的 (localhost)，直接跳过不报错，防止中断脚本
+      - name: Send Discord Notification
+        run: |
+          if [[ "${{ secrets.DISCORD_WEBHOOK_URL }}" == *"localhost"* || "${{ secrets.DISCORD_WEBHOOK_URL }}" == "" ]]; then
+            echo "检测到未配置真实的 Discord Webhook，已跳过通知发送。抢机任务正常运行。"
+          else
+            echo "正在发送本地状态到 Discord..."
+            curl -H "Content-Type: application/json" \
+                 -X POST \
+                 -d "{\"content\": \"[甲骨文抢机报告]: ${{ env.RESULT_MSG }}\"}" \
+                 "${{ secrets.DISCORD_WEBHOOK_URL }}" || echo "通知发送失败，但不影响抢机。"
+          fi
