@@ -1,4 +1,4 @@
-# OCI Always Free Arm (A1.Flex) VM Creator
+# OCI Always Free Arm (A1.Flex) VM Creator 
 
 [![Try to Create OCI VM](https://github.com/heykapil/oci-free-arm-instance/actions/workflows/create-vm.yml/badge.svg)](https://github.com/heykapil/oci-free-arm-instance/actions/workflows/create-vm.yml)
 
